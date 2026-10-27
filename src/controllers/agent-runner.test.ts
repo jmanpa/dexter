@@ -1,7 +1,7 @@
 import { describe, expect, test, mock, beforeEach, afterEach } from 'bun:test';
 import { AgentRunnerController } from './agent-runner.js';
 import { InMemoryChatHistory } from '../utils/in-memory-chat-history.js';
-import type { AgentConfig, AgentEvent, ApprovalDecision } from '../agent/types.js';
+import type { AgentConfig, AgentEvent } from '../agent/types.js';
 
 /**
  * Helper to create an AgentRunnerController with a change counter
@@ -75,8 +75,12 @@ describe('AgentRunnerController', () => {
   });
 
   describe('approval state', () => {
-    test('sets pendingApproval when entering approval state', async () => {
-      const { controller } = createController();
+    test('shows the requested approval and notifies the UI', async () => {
+      let sawApprovalChange = false;
+      let controller: AgentRunnerController;
+      ({ controller } = createController(() => {
+        if (controller.pendingApproval?.tool === 'write_file') sawApprovalChange = true;
+      }));
 
       expect(controller.pendingApproval).toBeNull();
 
@@ -87,6 +91,8 @@ describe('AgentRunnerController', () => {
 
       expect(controller.pendingApproval).not.toBeNull();
       expect(controller.pendingApproval?.tool).toBe('write_file');
+      expect(controller.workingState.status).toBe('approval');
+      expect(sawApprovalChange).toBe(true);
       expect(controller.pendingApproval?.args).toMatchObject({
         path: '.dexter/RULES.md',
         content: 'test',
@@ -97,120 +103,56 @@ describe('AgentRunnerController', () => {
       await runPromise;
     });
 
-    test('fires onChange when entering approval state', async () => {
+    test('allow-once clears approval, notifies the UI and completes idle', async () => {
       const { controller, getChangeCount } = createController();
-      const initialCount = getChangeCount();
 
       const runPromise = controller.runQuery('test query');
-
-      // Wait a tick for the async agent.run() to start
       await new Promise(resolve => setTimeout(resolve, 10));
 
-      expect(getChangeCount()).toBeGreaterThan(initialCount);
+      expect(controller.pendingApproval).not.toBeNull();
+      const countAfterEnter = getChangeCount();
 
-      // Clean up: deny to complete the run
-      controller.respondToApproval('deny');
+      controller.respondToApproval('allow-once');
+      expect(controller.pendingApproval).toBeNull();
+      expect(controller.workingState.status).toBe('thinking');
+      expect(getChangeCount()).toBeGreaterThan(countAfterEnter);
       await runPromise;
+      expect(controller.workingState.status).toBe('idle');
     });
 
-    test('clears pendingApproval on allow-once', async () => {
-      const { controller } = createController();
+    test('deny clears approval, notifies the UI and completes idle', async () => {
+      const { controller, getChangeCount } = createController();
 
       const runPromise = controller.runQuery('test query');
       await new Promise(resolve => setTimeout(resolve, 10));
 
       expect(controller.pendingApproval).not.toBeNull();
 
-      controller.respondToApproval('allow-once');
-      await runPromise;
-
-      expect(controller.pendingApproval).toBeNull();
-    });
-
-    test('clears pendingApproval on deny', async () => {
-      const { controller } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(controller.pendingApproval).not.toBeNull();
-
-      controller.respondToApproval('deny');
-      await runPromise;
-
-      expect(controller.pendingApproval).toBeNull();
-    });
-
-    test('fires onChange when exiting approval state', async () => {
-      const { controller, getChangeCount } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
       const countAfterEnter = getChangeCount();
-
-      controller.respondToApproval('allow-once');
-      await runPromise;
-
-      expect(getChangeCount()).toBeGreaterThan(countAfterEnter);
-    });
-
-    test('fires onChange when exiting approval state via deny', async () => {
-      const { controller, getChangeCount } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      const countAfterEnter = getChangeCount();
-
       controller.respondToApproval('deny');
-      await runPromise;
-
+      expect(controller.pendingApproval).toBeNull();
       expect(getChangeCount()).toBeGreaterThan(countAfterEnter);
+      await runPromise;
+      expect(controller.workingState.status).toBe('idle');
     });
   });
 
   describe('cancelExecution', () => {
-    test('clears pendingApproval', async () => {
-      const { controller } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(controller.pendingApproval).not.toBeNull();
-
-      controller.cancelExecution();
-      await runPromise;
-
-      expect(controller.pendingApproval).toBeNull();
-    });
-
-    test('fires onChange', async () => {
+    test('clears approval, notifies the UI and returns idle', async () => {
       const { controller, getChangeCount } = createController();
 
       const runPromise = controller.runQuery('test query');
       await new Promise(resolve => setTimeout(resolve, 10));
 
+      expect(controller.pendingApproval).not.toBeNull();
+      expect(controller.workingState.status).toBe('approval');
       const countBeforeCancel = getChangeCount();
 
       controller.cancelExecution();
-      await runPromise;
-
-      expect(getChangeCount()).toBeGreaterThan(countBeforeCancel);
-    });
-
-    test('sets workingState to idle', async () => {
-      const { controller } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(controller.workingState.status).toBe('approval');
-
-      controller.cancelExecution();
-      await runPromise;
-
+      expect(controller.pendingApproval).toBeNull();
       expect(controller.workingState.status).toBe('idle');
+      expect(getChangeCount()).toBeGreaterThan(countBeforeCancel);
+      await runPromise;
     });
   });
 
@@ -223,33 +165,6 @@ describe('AgentRunnerController', () => {
       controller.respondToApproval('allow-once');
 
       expect(getChangeCount()).toBe(countBefore);
-    });
-
-    test('updates workingState to thinking on allow-once', async () => {
-      const { controller } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      expect(controller.workingState.status).toBe('approval');
-
-      controller.respondToApproval('allow-once');
-      await runPromise;
-
-      // After run completes, workingState returns to idle
-      expect(controller.workingState.status).toBe('idle');
-    });
-
-    test('keeps workingState idle on deny', async () => {
-      const { controller } = createController();
-
-      const runPromise = controller.runQuery('test query');
-      await new Promise(resolve => setTimeout(resolve, 10));
-
-      controller.respondToApproval('deny');
-      await runPromise;
-
-      expect(controller.workingState.status).toBe('idle');
     });
   });
 
